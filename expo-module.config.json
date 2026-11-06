@@ -1,0 +1,9 @@
+{
+  "platforms": ["apple", "android"],
+  "apple": {
+    "modules": ["CieSignModule"]
+  },
+  "android": {
+    "modules": ["it.codingduck.ciesign.CieSignModule"]
+  }
+}

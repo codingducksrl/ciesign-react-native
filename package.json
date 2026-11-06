@@ -1,0 +1,45 @@
+{
+  "name": "ciesign-react-native",
+  "version": "0.1.0",
+  "description": "PAdES and CAdES signatures with the Italian electronic identity card (CIE) over NFC",
+  "main": "build/index.js",
+  "types": "build/index.d.ts",
+  "files": [
+    "build",
+    "src",
+    "android/build.gradle",
+    "android/src",
+    "ios",
+    "app.plugin.js",
+    "expo-module.config.json"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prepare": "tsc",
+    "test": "node --import ./test/hooks.mjs --test test/*.test.ts"
+  },
+  "keywords": [
+    "react-native",
+    "expo",
+    "cie",
+    "pades",
+    "cades",
+    "nfc"
+  ],
+  "author": "Guglielmo Frati",
+  "license": "MIT",
+  "dependencies": {
+    "@cantoo/pdf-lib": "^2.11.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "expo": "~58.0.23",
+    "typescript": "~6.0.3"
+  },
+  "peerDependencies": {
+    "expo": "*",
+    "react-native": "*"
+  },
+  "homepage": "https://github.com/codingducksrl/ciesign-react-native#readme",
+  "repository": "https://github.com/codingducksrl/ciesign-react-native"
+}

@@ -1,0 +1,20 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'it.codingduck.ciesign'
+version = '0.1.0'
+
+android {
+  namespace 'it.codingduck.ciesign'
+  defaultConfig {
+    versionCode 1
+    versionName '0.1.0'
+  }
+}
+
+dependencies {
+  // Exact version: CieCard.java calls classes that are Kotlin-internal in this release.
+  implementation 'it.pagopa.io.app.cie:cie:0.1.11'
+}
