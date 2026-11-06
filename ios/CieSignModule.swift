@@ -10,15 +10,18 @@ public class CieSignModule: Module {
   public func definition() -> ModuleDefinition {
     Name("CieSign")
 
+    Events("onStep")
+
+    // `messages`: NFC sheet texts by step, `prompt` first.
     AsyncFunction("connect") {
-      @MainActor (id: Int, pin: String?, save: Bool, prompt: String, biometricPrompt: String, biometricCancel: String) async throws -> Data in
+      @MainActor (id: Int, pin: String?, save: Bool, messages: [String: String], biometricPrompt: String, biometricCancel: String) async throws -> Data in
       guard NFCTagReaderSession.readingAvailable else { throw failure("NFC_UNAVAILABLE", "NFC tag reading is not available") }
       guard id > self.closed else { throw cancelled }
-      self.reader?.close(nil)
-      let reader = Reader(id: id)
+      self.reader?.close(nil, nil)
+      let reader = Reader(id: id, messages: messages, onStep: self.reporter(id))
       self.reader = reader
       do {
-        return try await reader.connect(pin: pin, save: save, prompt: prompt, biometricPrompt: biometricPrompt, biometricCancel: biometricCancel)
+        return try await reader.connect(pin: pin, save: save, biometricPrompt: biometricPrompt, biometricCancel: biometricCancel)
       } catch {
         let error = coded(reader.invalidation ?? error)
         if pin == nil, let code = (error as? Exception)?.code, code.hasPrefix("WRONG_PIN") || code == "PIN_LOCKED" { SavedPin.delete() }
@@ -30,16 +33,17 @@ public class CieSignModule: Module {
       guard let reader = self.reader, reader.id == id else { throw cancelled }
       do {
         guard let card = reader.card else { throw cancelled }  // the reason is in `invalidation`, e.g. a timeout
+        reader.show("signing")
         return try await card.sign(digestInfo)
       } catch {
         throw coded(reader.invalidation ?? error)
       }
     }
 
-    AsyncFunction("close") { @MainActor (id: Int, error: String?) async in
+    AsyncFunction("close") { @MainActor (id: Int, error: String?, done: String?) async in
       self.closed = max(self.closed, id)
       guard let reader = self.reader, reader.id <= id else { return }
-      reader.close(error)
+      reader.close(error, done)
       self.reader = nil
     }
 
@@ -50,14 +54,21 @@ public class CieSignModule: Module {
     AsyncFunction("forgetPin") { SavedPin.delete() }
 
     OnDestroy {
-      DispatchQueue.main.async { self.reader?.close(nil) }
+      DispatchQueue.main.async { self.reader?.close(nil, nil) }
     }
+  }
+
+  /// Sends session `id`'s steps to JS as `onStep` events, without keeping the module alive.
+  private func reporter(_ id: Int) -> (String) -> Void {
+    { [weak self] step in self?.sendEvent("onStep", ["id": id, "step": step]) }
   }
 }
 
 /// One NFCTagReaderSession; used on the main thread only.
 private final class Reader: NSObject, NFCTagReaderSessionDelegate {
   let id: Int
+  private let messages: [String: String]
+  private let onStep: (String) -> Void
   private var session: NFCTagReaderSession?
   private var pending: CheckedContinuation<Data, Error>?
   private var pin = ""
@@ -68,13 +79,26 @@ private final class Reader: NSObject, NFCTagReaderSessionDelegate {
   private(set) var card: CieCard?
   private(set) var invalidation: Error?
 
-  init(id: Int) {
+  init(id: Int, messages: [String: String], onStep: @escaping (String) -> Void) {
     self.id = id
+    self.messages = messages
+    self.onStep = onStep
+  }
+
+  /// Shows the NFC sheet text for `step`, if any.
+  func show(_ step: String) {
+    if let message = messages[step] { session?.alertMessage = message }
+  }
+
+  /// Shows `step` in the NFC sheet and reports it to JS.
+  private func reach(_ step: String) {
+    show(step)
+    onStep(step)
   }
 
   /// A nil `pin` unlocks the saved one with Face ID or Touch ID; `save` saves `pin` once the card accepts it, with no
   /// prompt, since writing the Keychain item needs no authentication.
-  func connect(pin: String?, save: Bool, prompt: String, biometricPrompt: String, biometricCancel: String) async throws -> Data {
+  func connect(pin: String?, save: Bool, biometricPrompt: String, biometricCancel: String) async throws -> Data {
     if let pin {
       if save, !SavedPin.canSave { throw SavedPinError.biometryUnavailable }
       (self.pin, self.save) = (pin, save)
@@ -92,16 +116,22 @@ private final class Reader: NSObject, NFCTagReaderSessionDelegate {
       }
       pending = continuation
       self.session = session
-      session.alertMessage = prompt
+      show("prompt")
       session.begin()
     }
   }
 
-  func close(_ error: String?) {
+  /// Ends the session; the NFC sheet shows `error` if there is one, otherwise `done` next to its checkmark.
+  func close(_ error: String?, _ done: String?) {
     closed = true
     biometrics?.invalidate()
     finish(.failure(cancelled))
-    if let error { session?.invalidate(errorMessage: error) } else { session?.invalidate() }
+    if let error {
+      session?.invalidate(errorMessage: error)
+    } else {
+      if let done { session?.alertMessage = done }
+      session?.invalidate()
+    }
     session = nil
     card = nil
   }
@@ -120,6 +150,7 @@ private final class Reader: NSObject, NFCTagReaderSessionDelegate {
     Task { @MainActor in
       do {
         try await session.connect(to: tags[0])
+        reach("detected")
         let card = CieCard { apdu in
           guard let command = NFCISO7816APDU(data: apdu) else { throw failure("CARD_ERROR", "Malformed APDU") }
           let (data, sw1, sw2) = try await tag.sendCommand(apdu: command)
@@ -127,10 +158,12 @@ private final class Reader: NSObject, NFCTagReaderSessionDelegate {
         }
         let serviceId = try await card.serviceId()
         if let owner, owner != serviceId { throw SavedPinError.otherCard }
+        reach("pin")
         try await card.open(pin: pin)
         if save { try SavedPin.store(pin, card: serviceId) }
         let certificate = try await card.certificate()
         self.card = card
+        show("ready")  // JS reports `ready` once connect resolves
         finish(.success(certificate))
       } catch let error as NFCReaderError where error.code == .readerTransceiveErrorSessionInvalidated {
         // didInvalidateWithError follows with the reason (cancel, timeout).

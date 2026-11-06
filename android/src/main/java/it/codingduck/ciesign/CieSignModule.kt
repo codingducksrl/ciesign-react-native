@@ -33,8 +33,11 @@ class CieSignModule : Module() {
   override fun definition() = ModuleDefinition {
     Name("CieSign")
 
+    Events("onStep")
+
     // A null `pin` unlocks the saved one; `save` saves `pin` once the card accepts it. Both show the biometric prompt first.
-    AsyncFunction("connect") { id: Int, pin: String?, save: Boolean, _: String, biometricPrompt: String, biometricCancel: String, promise: Promise ->
+    // The messages are for the iOS NFC sheet: Android has none.
+    AsyncFunction("connect") { id: Int, pin: String?, save: Boolean, _: Map<String, String>, biometricPrompt: String, biometricCancel: String, promise: Promise ->
       val activity = appContext.currentActivity ?: throw CodedException("NFC_UNAVAILABLE", "No foreground activity", null)
       val adapter = NfcAdapter.getDefaultAdapter(activity)
       if (adapter?.isEnabled != true) throw CodedException("NFC_UNAVAILABLE", "NFC is missing or turned off", null)
@@ -77,7 +80,7 @@ class CieSignModule : Module() {
       }
     }
 
-    Function("close") { id: Int, _: String? ->
+    Function("close") { id: Int, _: String?, _: String? ->
       synchronized(lock) {
         closed = maxOf(closed, id)
         if (session in 1..id) end()
@@ -144,6 +147,7 @@ class CieSignModule : Module() {
         }
         tag = isoDep
       }
+      step(id, "detected")
       val c = CieCard(object : OnTransmit {
         override fun sendCommand(apdu: ByteArray, nfcEvents: NfcEvent): ApduResponse {
           val response = isoDep.transceive(apdu)
@@ -155,6 +159,7 @@ class CieSignModule : Module() {
       })
       val nis = c.serviceId()
       if (owner != null && owner != nis) throw CodedException("WRONG_CARD", "Not the card the PIN was saved for", null)
+      step(id, "pin")
       val certificate = c.open(pin)
       if (sealed != null) savedPin.store(nis, sealed)
       synchronized(lock) {
@@ -168,6 +173,8 @@ class CieSignModule : Module() {
       promise.reject(if (synchronized(lock) { session != id }) cancelled() else error)
     }
   }
+
+  private fun step(id: Int, step: String) = sendEvent("onStep", mapOf("id" to id, "step" to step))
 
   private fun end() {
     pending?.reject(cancelled())
