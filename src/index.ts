@@ -1,9 +1,7 @@
-import { type Bytes, type Signer, fail, sha256, signedData, trimDer, verify } from './cms';
+import { type Bytes, trimDer, verify } from './certificate';
 import Native, { type PinStatus } from './native';
 
-export type { Signer } from './cms';
 export type { PinStatus } from './native';
-export { signPades, type PadesOptions } from './pades';
 
 /** Pass instead of the PIN to use the one saved with `savePin`, unlocked with Face ID, Touch ID or a fingerprint. */
 export const SAVED_PIN: unique symbol = Symbol('SAVED_PIN');
@@ -18,16 +16,22 @@ export type Pin = string | typeof SAVED_PIN;
  */
 export type CieOptions = { prompt?: string; error?: string; savePin?: boolean; biometricPrompt?: string; biometricCancel?: string };
 
-/** Enveloping CAdES-BES signature: the DER content of a .p7m file. */
-export const signCades = async (content: Bytes, signer: Signer): Promise<Bytes> =>
-  signedData(await sha256(content), signer, content);
+/** A card whose PIN has been verified, for as long as `use` runs. */
+export type CieSession = {
+  /** DER authentication certificate; its subject holds the holder's name and fiscal code. */
+  certificate: Bytes;
+  /** RSA PKCS#1 v1.5 signature of a DER DigestInfo, checked against `certificate`. Calls run one at a time. */
+  sign(digestInfo: Bytes): Promise<Bytes>;
+};
 
-let epoch = 0; // bumped by cancel()
 let session = 0; // id of the latest NFC session
 
-async function withCard<T>(created: number, pin: Pin, options: CieOptions, use: (certificate: Bytes, id: number) => Promise<T>) {
+/**
+ * Waits for the card and verifies the PIN, then runs `use`: every `sign` goes through this NFC session, which ends when
+ * `use` settles.
+ */
+export async function cieSession<T>(pin: Pin, use: (session: CieSession) => Promise<T>, options: CieOptions = {}): Promise<T> {
   if (pin !== SAVED_PIN && !/^\d{8}$/.test(pin)) throw new Error('The CIE PIN has 8 digits');
-  if (created !== epoch) throw fail('CANCELLED', 'Cancelled');
   const {
     prompt = "Avvicina la CIE al retro dell'iPhone",
     error = 'Operazione non riuscita',
@@ -38,8 +42,19 @@ async function withCard<T>(created: number, pin: Pin, options: CieOptions, use: 
   const id = ++session;
   let done = false;
   try {
-    const certificate = await Native.connect(id, pin === SAVED_PIN ? null : pin, savePin, prompt, biometricPrompt, biometricCancel);
-    const result = await use(trimDer(certificate), id);
+    const certificate = trimDer(await Native.connect(id, pin === SAVED_PIN ? null : pin, savePin, prompt, biometricPrompt, biometricCancel));
+    let last: Promise<unknown> = Promise.resolve();
+    const sign = (digestInfo: Bytes) => {
+      const input = digestInfo.slice(); // signed later, once the calls before it finish
+      const signature = last.then(async () => {
+        const signature = await Native.sign(id, input);
+        verify(certificate, input, signature);
+        return signature;
+      });
+      last = signature.catch(() => {});
+      return signature;
+    };
+    const result = await use({ certificate, sign });
     done = true;
     return result;
   } finally {
@@ -47,27 +62,8 @@ async function withCard<T>(created: number, pin: Pin, options: CieOptions, use: 
   }
 }
 
-/** Signs with the CIE in a single NFC tap. */
-export const cieSigner = (pin: Pin, options: CieOptions = {}): Signer => {
-  const created = epoch;
-  return (toBeSigned) =>
-    withCard(created, pin, options, async (certificate, id) => {
-      const digestInfo = await toBeSigned(certificate);
-      const signature = await Native.sign(id, digestInfo);
-      verify(certificate, digestInfo, signature);
-      return signature;
-    });
-};
-
-/** Reads the CIE authentication certificate (DER). */
-export const readCertificate = (pin: Pin, options: CieOptions = {}): Promise<Bytes> =>
-  withCard(epoch, pin, options, async (certificate) => certificate);
-
-/** Aborts the CIE operation in progress and invalidates every signer created before this call. */
-export const cancel = () => {
-  epoch++;
-  Native.close(session, null);
-};
+/** Aborts the CIE session in progress. */
+export const cancel = () => Native.close(session, null);
 
 /** Whether a PIN is saved, without showing any UI. */
 export const pinStatus = (): Promise<PinStatus> => Native.pinStatus();

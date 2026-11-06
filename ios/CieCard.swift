@@ -1,3 +1,5 @@
+// Derived from PagoPA cie-sdk-ios (https://github.com/pagopa/cie-sdk-ios), MIT License, Copyright (c) 2025 PagoPA S.p.A.
+
 import CommonCrypto
 import CryptoKit
 import Foundation

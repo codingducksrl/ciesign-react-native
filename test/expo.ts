@@ -1,5 +1,3 @@
-import { createHash } from 'node:crypto';
-
 /** Stands in for the card; tests set `connect` and `sign` and inspect `closed`. */
 export const card = {
   connect: async (_id: number, _pin: string | null, _save: boolean): Promise<Uint8Array> => new Uint8Array(),
@@ -8,7 +6,6 @@ export const card = {
 };
 
 export const requireNativeModule = () => ({
-  sha256: async (data: Uint8Array) => new Uint8Array(createHash('sha256').update(data).digest()),
   connect: (id: number, pin: string | null, save: boolean) => card.connect(id, pin, save),
   sign: (id: number, digestInfo: Uint8Array) => card.sign(id, digestInfo),
   close: (id: number, error: string | null) => void card.closed.push([id, error]),

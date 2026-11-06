@@ -17,7 +17,6 @@ import it.pagopa.io.app.cie.cie.NfcError
 import it.pagopa.io.app.cie.cie.NfcEvent
 import it.pagopa.io.app.cie.cie.OnTransmit
 import java.io.IOException
-import java.security.MessageDigest
 import javax.crypto.Cipher
 
 class CieSignModule : Module() {
@@ -33,8 +32,6 @@ class CieSignModule : Module() {
 
   override fun definition() = ModuleDefinition {
     Name("CieSign")
-
-    AsyncFunction("sha256") { data: ByteArray -> MessageDigest.getInstance("SHA-256").digest(data) }
 
     // A null `pin` unlocks the saved one; `save` saves `pin` once the card accepts it. Both show the biometric prompt first.
     AsyncFunction("connect") { id: Int, pin: String?, save: Boolean, _: String, biometricPrompt: String, biometricCancel: String, promise: Promise ->

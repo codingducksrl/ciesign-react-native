@@ -11,7 +11,7 @@ Pod::Spec.new do |s|
   s.homepage       = package['homepage']
   s.platforms      = { :ios => '16.4' }
   s.swift_version  = '5.9'
-  s.source         = { git: package['repository'] }
+  s.source         = { git: 'https://github.com/codingducksrl/ciesign-react-native.git' }
   s.static_framework = true
   s.dependency 'ExpoModulesCore'
   s.source_files = '*.swift'

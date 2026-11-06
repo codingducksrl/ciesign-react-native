@@ -1,5 +1,4 @@
 import CoreNFC
-import CryptoKit
 import ExpoModulesCore
 import LocalAuthentication
 
@@ -10,8 +9,6 @@ public class CieSignModule: Module {
 
   public func definition() -> ModuleDefinition {
     Name("CieSign")
-
-    AsyncFunction("sha256") { (data: Data) in Data(SHA256.hash(data: data)) }
 
     AsyncFunction("connect") {
       @MainActor (id: Int, pin: String?, save: Bool, prompt: String, biometricPrompt: String, biometricCancel: String) async throws -> Data in
@@ -30,8 +27,9 @@ public class CieSignModule: Module {
     }
 
     AsyncFunction("sign") { @MainActor (id: Int, digestInfo: Data) async throws -> Data in
-      guard let reader = self.reader, reader.id == id, let card = reader.card else { throw cancelled }
+      guard let reader = self.reader, reader.id == id else { throw cancelled }
       do {
+        guard let card = reader.card else { throw cancelled }  // the reason is in `invalidation`, e.g. a timeout
         return try await card.sign(digestInfo)
       } catch {
         throw coded(reader.invalidation ?? error)
