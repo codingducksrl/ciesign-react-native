@@ -23,14 +23,20 @@ final class CieCard {
     self.transmit = transmit
   }
 
+  /// NIS from EF.ID_Servizi (EF 1001): identifies the card and is readable without the PIN.
+  func serviceId() async throws -> Data {
+    sm = nil
+    try await selectApplications()
+    try await send(0x00, 0xA4, 0x02, 0x04, [0x10, 0x01])
+    let r = try await send(0x00, 0xB0, 0x00, 0x00, le: 0x0C)
+    guard r.sw == 0x9000 else { throw CieCardError.notCie }
+    return Data(r.data)
+  }
+
   /// Selects IAS + CIE apps, opens secure messaging (DH key exchange + DAPP device/chip authentication), verifies the 8-digit PIN (key ref 0x81).
   func open(pin: String) async throws {
     sm = nil
-    var sw = try await send(0x00, 0xA4, 0x04, 0x0C, bytes("A0000000308000000009816001")).sw
-    if sw == 0x6A82 { sw = try await send(0x00, 0xA4, 0x00, 0x00).sw }  // NXP chips have no IAS AID: select MF
-    guard sw == 0x9000, try await send(0x00, 0xA4, 0x04, 0x0C, bytes("A00000000039")).sw == 0x9000 else {
-      throw CieCardError.notCie
-    }
+    try await selectApplications()
 
     var gpq = [[UInt8]]()
     for tag: UInt8 in [0x97, 0x98, 0x99] {
@@ -98,6 +104,14 @@ final class CieCard {
     guard sm != nil else { throw CieCardError.secureMessaging }
     try await ok(send(0x00, 0x22, 0x41, 0xA4, tlv(0x80, [0x02]) + tlv(0x84, [0x81])))
     return Data(try await ok(send(0x00, 0x88, 0x00, 0x00, [UInt8](digestInfo))))
+  }
+
+  private func selectApplications() async throws {
+    var sw = try await send(0x00, 0xA4, 0x04, 0x0C, bytes("A0000000308000000009816001")).sw
+    if sw == 0x6A82 { sw = try await send(0x00, 0xA4, 0x00, 0x00).sw }  // NXP chips have no IAS AID: select MF
+    guard sw == 0x9000, try await send(0x00, 0xA4, 0x04, 0x0C, bytes("A00000000039")).sw == 0x9000 else {
+      throw CieCardError.notCie
+    }
   }
 
   /// Reads a transparent EF up to the end of its first TLV (files are zero-padded).

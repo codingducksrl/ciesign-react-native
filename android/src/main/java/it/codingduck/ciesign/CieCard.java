@@ -12,9 +12,13 @@ final class CieCard {
     commands = new CieCommands(transmit);
   }
 
+  /** NIS from EF.ID_Servizi, as hex: identifies the card and is readable without the PIN. */
+  String serviceId() throws Exception {
+    return commands.getServiceID();
+  }
+
   /** Opens secure messaging, verifies the PIN and returns the certificate file (EF 1003, zero padded). */
   byte[] open(String pin) throws Exception {
-    commands.getServiceID();
     commands.startSecureChannel(pin);
     return commands.readCertCie();
   }

@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
-import { type Signer, cancel, cieSigner, signCades, signPades } from '../src/index';
+import { SAVED_PIN, type Signer, cancel, cieSigner, signCades, signPades } from '../src/index';
 import { card } from './expo';
 
 const dir = mkdtempSync(join(tmpdir(), 'ciesign-'));
@@ -98,6 +98,16 @@ test('the PIN is checked before the card is touched', async () => {
   fakeCard();
   await assert.rejects(signCades(content, cieSigner('1234')), /8 digits/);
   assert.equal(card.closed.length, 0);
+});
+
+test('SAVED_PIN leaves the PIN to the native side; savePin is passed through', async () => {
+  fakeCard();
+  const calls: [string | null, boolean][] = [];
+  card.connect = async (_id, pin, save) => (calls.push([pin, save]), padded);
+  await signCades(content, cieSigner(SAVED_PIN));
+  await signCades(content, cieSigner('12345678', { savePin: true }));
+  await signCades(content, cieSigner('12345678'));
+  assert.deepEqual(calls, [[null, false], ['12345678', true], ['12345678', false]]);
 });
 
 test.after(() => console.log(`output: ${dir}`));
