@@ -66,7 +66,7 @@ Inputs and outputs are `Uint8Array`. The promise stays pending until the card is
 
 | Export | |
 |---|---|
-| `cieSession(pin, use, { prompt?, error?, savePin?, biometricPrompt?, biometricCancel? })` | Waits for the card and verifies the PIN, then resolves to what `use({ certificate, sign })` resolves to. The NFC session ends when `use` settles: the card must stay on the phone until then. `pin` is the 8-digit PIN or `SAVED_PIN`. `prompt` and `error` are the iOS NFC sheet texts; the others are explained under [Saved PIN](#saved-pin). |
+| `cieSession(pin, use, { prompt?, error?, messages?, onStep?, savePin?, biometricPrompt?, biometricCancel? })` | Waits for the card and verifies the PIN, then resolves to what `use({ certificate, sign })` resolves to. The NFC session ends when `use` settles: the card must stay on the phone until then. `pin` is the 8-digit PIN or `SAVED_PIN`. `prompt` and `error` are the iOS NFC sheet texts while waiting for the card and on failure; `messages` and `onStep` are explained under [Progress](#progress), the others under [Saved PIN](#saved-pin). |
 | `certificate` | The card's DER authentication certificate: holder name and fiscal code are in its subject. |
 | `sign(digestInfo)` | RSA PKCS#1 v1.5 signature (the card adds the padding) of a DER DigestInfo, checked against `certificate`. Call it as often as needed while `use` runs; calls run one at a time, in order. |
 | `SAVED_PIN`, `pinStatus()`, `forgetPin()` | See [Saved PIN](#saved-pin). |
@@ -92,6 +92,27 @@ A PIN that is not 8 digits throws a plain `Error`. Card errors carry a `code`:
 | `BIOMETRIC_UNAVAILABLE` | `SAVED_PIN` or `savePin` without a usable strong biometric: locked out after failed attempts, Face ID denied to the app, no secure hardware, or, for `savePin`, none enrolled. On Android, also when the activity is not a `FragmentActivity`. |
 
 On Android the app must stay in the foreground while the card is read.
+
+### Progress
+
+A session goes through these steps. On iOS the NFC sheet shows the text of each one; `messages` overrides any of them. `onStep(step)` is called as each one is reached, for example to show progress in your own UI on Android, which has no NFC sheet.
+
+| Step | When | Default iOS sheet text |
+|---|---|---|
+| `detected` | The card is on the phone. | CIE rilevata, non allontanarla |
+| `pin` | The PIN is being verified. | Verifica del PIN… |
+| `ready` | PIN verified and certificate read: `use` starts. | PIN verificato |
+| `signing` | A signature starts, once per `sign`. | Firma in corso… |
+| `done` | `use` resolved and the session is over. The sheet shows it next to its checkmark. | Operazione completata |
+
+```ts
+const signatures = await cieSession(pin, use, {
+  messages: { done: 'Verbale firmato' },
+  onStep: (step) => setStatus(step),
+});
+```
+
+Steps only move forward. A failed session stops at the last step it reached and rejects; on iOS the sheet shows `error`.
 
 ### Saved PIN
 

@@ -107,3 +107,62 @@ test('SAVED_PIN leaves the PIN to the native side; savePin is passed through', a
   await cieSession('12345678', async () => {});
   assert.deepEqual(calls, [[null, false], ['12345678', true], ['12345678', false]]);
 });
+
+test('steps arrive in order, native ones included', async () => {
+  fakeCard();
+  card.connect = async (id) => {
+    card.emit(id, 'detected');
+    card.emit(id + 1, 'pin'); // another session's
+    card.emit(id, 'pin');
+    return padded;
+  };
+  const steps: string[] = [];
+  await cieSession('12345678', async ({ sign }) => Promise.all([sign(digestInfo('verbale')), sign(digestInfo('allegato'))]), {
+    onStep: (step) => steps.push(step),
+  });
+  assert.deepEqual(steps, ['detected', 'pin', 'ready', 'signing', 'signing', 'done']);
+  assert.equal(card.listeners.size, 0);
+});
+
+test('late native steps and signatures after the session are not reported', async () => {
+  fakeCard();
+  let id = 0;
+  card.connect = async (connectId) => ((id = connectId), padded);
+  const steps: string[] = [];
+  let late: ((digestInfo: Uint8Array) => Promise<Uint8Array>) | undefined;
+  await cieSession(
+    '12345678',
+    async ({ sign }) => {
+      card.emit(id, 'detected'); // arrives after connect resolved
+      late = sign;
+    },
+    { onStep: (step) => steps.push(step) },
+  );
+  card.sign = async () => {
+    throw Object.assign(new Error('Cancelled'), { code: 'CANCELLED' });
+  };
+  await assert.rejects(late!(digestInfo('verbale')), { code: 'CANCELLED' });
+  assert.deepEqual(steps, ['ready', 'done']);
+});
+
+test('a failed session reports no done', async () => {
+  fakeCard();
+  const steps: string[] = [];
+  await assert.rejects(
+    cieSession('12345678', async () => Promise.reject(new Error('boom')), { onStep: (step) => steps.push(step) }),
+    /boom/,
+  );
+  assert.deepEqual(steps, ['ready']);
+});
+
+test('sheet texts: defaults, overrides, done or error on close', async () => {
+  fakeCard();
+  const sent: Record<string, string>[] = [];
+  card.connect = async (_id, _pin, _save, messages) => (sent.push(messages), padded);
+  await cieSession('12345678', async () => {}, { prompt: 'Avvicina', messages: { pin: 'PIN…', done: 'Firmato', ready: undefined } });
+  assert.deepEqual(sent[0], { prompt: 'Avvicina', detected: 'CIE rilevata, non allontanarla', pin: 'PIN…', ready: 'PIN verificato', signing: 'Firma in corso…' });
+  assert.deepEqual(card.closed, [[card.closed[0][0], null, 'Firmato']]);
+  card.closed = [];
+  await assert.rejects(cieSession('12345678', async () => Promise.reject(new Error('boom')), { error: 'Errore' }));
+  assert.deepEqual(card.closed.map(([, error, done]) => [error, done]), [['Errore', null]]);
+});
