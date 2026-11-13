@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
-import { SAVED_PIN, cieSession } from '../src/index';
+import { SAVED_PIN, cieSession, savedCertificate } from '../src/index';
 import { card } from './expo';
 
 const dir = mkdtempSync(join(tmpdir(), 'ciesign-'));
@@ -26,6 +26,7 @@ let connects = 0;
 const fakeCard = (tamper = (signature: Uint8Array) => signature) => {
   connects = 0;
   card.closed = [];
+  card.unlock = async () => null;
   card.connect = async () => (connects++, padded);
   card.sign = async (_id, input) => tamper(new Uint8Array(privateEncrypt(key, input)));
 };
@@ -106,6 +107,72 @@ test('SAVED_PIN leaves the PIN to the native side; savePin is passed through', a
   await cieSession('12345678', async () => {}, { savePin: true });
   await cieSession('12345678', async () => {});
   assert.deepEqual(calls, [[null, false], ['12345678', true], ['12345678', false]]);
+});
+
+test('the saved certificate is used only when asked, and only with SAVED_PIN', async () => {
+  fakeCard();
+  const calls: boolean[] = [];
+  card.unlock = async (_id, useSavedCertificate) => (calls.push(useSavedCertificate), null);
+  await cieSession(SAVED_PIN, async () => {});
+  await cieSession(SAVED_PIN, async () => {}, { useSavedCertificate: true });
+  await cieSession('12345678', async () => {}, { useSavedCertificate: true });
+  assert.deepEqual(calls, [false, true]);
+});
+
+test('beforeCard runs after the unlock and before the card, with the saved certificate', async () => {
+  fakeCard();
+  const order: string[] = [];
+  card.unlock = async () => (order.push('unlock'), padded);
+  const connect = card.connect;
+  card.connect = async (...args) => (order.push('connect'), connect(...args));
+  const before: (Uint8Array | null)[] = [];
+  await cieSession(SAVED_PIN, async () => void order.push('use'), {
+    useSavedCertificate: true,
+    beforeCard: async (saved) => {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      before.push(saved);
+      order.push('beforeCard');
+    },
+  });
+  assert.deepEqual(order, ['unlock', 'beforeCard', 'connect', 'use']);
+  assert.deepEqual(before, [certificate]);
+  card.unlock = async () => null;
+  await cieSession(SAVED_PIN, async () => {}, { beforeCard: async (saved) => void before.push(saved) });
+  assert.equal(before[1], null);
+});
+
+test('beforeCard is only for SAVED_PIN, and its failure ends the session before the card', async () => {
+  fakeCard();
+  let ran = false;
+  await cieSession('12345678', async () => {}, { beforeCard: async () => void (ran = true) });
+  assert.equal(ran, false);
+  assert.equal(connects, 1);
+  fakeCard();
+  await assert.rejects(
+    cieSession(SAVED_PIN, async () => {}, { error: 'Errore', beforeCard: async () => Promise.reject(new Error('server down')) }),
+    /server down/,
+  );
+  assert.equal(connects, 0);
+  assert.deepEqual(card.closed.map(([, error]) => error), ['Errore']);
+});
+
+test('a cancelled biometric prompt reaches neither beforeCard nor the card', async () => {
+  fakeCard();
+  card.unlock = async () => {
+    throw Object.assign(new Error('Cancelled'), { code: 'CANCELLED' });
+  };
+  let ran = false;
+  await assert.rejects(cieSession(SAVED_PIN, async () => {}, { beforeCard: async () => void (ran = true) }), { code: 'CANCELLED' });
+  assert.equal(ran, false);
+  assert.equal(connects, 0);
+  assert.equal(card.closed.length, 1);
+});
+
+test('savedCertificate trims the saved file, or is null', async () => {
+  card.savedCertificate = async () => padded;
+  assert.deepEqual(await savedCertificate(), certificate);
+  card.savedCertificate = async () => null;
+  assert.equal(await savedCertificate(), null);
 });
 
 test('steps arrive in order, native ones included', async () => {

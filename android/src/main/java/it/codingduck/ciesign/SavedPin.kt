@@ -22,12 +22,14 @@ import javax.crypto.spec.GCMParameterSpec
 /**
  * The CIE PIN encrypted with an AES-GCM Keystore key, in StrongBox when the device has it and otherwise in the TEE. The key
  * encrypts and decrypts only right after a strong biometric matches one enrolled when it was made. The file is not backed up.
+ * Next to it, its card's certificate: public, so stored as is, and replaced or deleted with the PIN.
  */
 internal class SavedPin(private val context: Context) {
   /** The encrypted PIN, the NIS of its card and the decrypt cipher that a biometric unlocks. */
   class Saved(val card: String, val pin: ByteArray, val cipher: Cipher)
 
   private val file = File(context.noBackupFilesDir, "ciesign-pin")
+  private val certificateFile = File(context.noBackupFilesDir, "ciesign-certificate")
   private val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
 
   val canSave get() = BiometricManager.from(context).canAuthenticate(BIOMETRIC_STRONG) == BiometricManager.BIOMETRIC_SUCCESS
@@ -61,10 +63,24 @@ internal class SavedPin(private val context: Context) {
     }
 
   /** Replaces the saved PIN; `card` is the NIS of the card that accepted it. */
-  fun store(card: String, sealed: String) = file.writeText("$card\n$sealed")
+  fun store(card: String, sealed: String) {
+    certificateFile.delete()
+    file.writeText("$card\n$sealed")
+  }
+
+  /** Saves the certificate file of the card whose PIN is saved; `card` is its NIS. */
+  fun storeCertificate(card: String, certificate: ByteArray) = certificateFile.writeText("$card\n${encode(certificate)}")
+
+  /** The certificate file saved with the PIN, if it is the card with NIS `card` (any when null); null when none is saved. */
+  fun certificate(card: String? = null): ByteArray? {
+    if (!file.exists()) return null
+    val (owner, certificate) = runCatching { certificateFile.readLines() }.getOrNull()?.takeIf { it.size == 2 } ?: return null
+    return if (card == null || card == owner) Base64.decode(certificate, Base64.NO_WRAP) else null
+  }
 
   fun delete() {
     file.delete()
+    certificateFile.delete()
   }
 
   private fun cipher(mode: Int, iv: ByteArray? = null): Cipher? {

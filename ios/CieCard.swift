@@ -52,8 +52,12 @@ final class CieCard {
     let ca = try await ok(send(0x00, 0xCB, 0x3F, 0xFF, [0x4D, 0x09, 0x70, 0x07, 0xBF, 0xA0, 0x04, 0x03, 0x7F, 0x49, 0x80]))
     let (caN, caCHR, caCHA) = try (Array(find(0x81, in: ca).drop { $0 == 0 }), find(0x5F20, in: ca), find(0x5F4C, in: ca))
 
+    // Some cards zero-pad q to the length of p (a 256-bit q in 256 bytes): drawn at full length, x would almost never be
+    // below it and this loop would spin until iOS drops the idle session. Draw it over q's significant bytes instead.
+    let order = Array(q.drop { $0 == 0 })
+    guard !order.isEmpty else { throw CieCardError.invalidResponse }
     var x: [UInt8]
-    repeat { x = random(q.count) } while !x.lexicographicallyPrecedes(q)
+    repeat { x = random(order.count) } while !x.lexicographicallyPrecedes(order)
     let pubIFD = try modPow(g, x, p)
     try await ok(send(0x00, 0x22, 0x41, 0xA6, tlv(0x80, [0x9B]) + tlv(0x83, [0x81]) + tlv(0x91, pubIFD)))
     let pubICC = try await find(0x91, in: ok(send(0x00, 0xCB, 0x3F, 0xFF, [0x4D, 0x04, 0xA6, 0x02, 0x91, 0x00])))

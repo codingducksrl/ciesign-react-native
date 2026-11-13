@@ -17,9 +17,13 @@ final class CieCard {
     return commands.getServiceID();
   }
 
-  /** Opens secure messaging, verifies the PIN and returns the certificate file (EF 1003, zero padded). */
-  byte[] open(String pin) throws Exception {
+  /** Opens secure messaging and verifies the PIN. */
+  void open(String pin) throws Exception {
     commands.startSecureChannel(pin);
+  }
+
+  /** The certificate file (EF 1003, zero padded), once {@link #open} has verified the PIN. */
+  byte[] certificate() throws Exception {
     return commands.readCertCie();
   }
 
