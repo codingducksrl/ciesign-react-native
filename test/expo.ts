@@ -3,7 +3,9 @@ type StepListener = (event: { id: number; step: 'detected' | 'pin' }) => void;
 
 /** Stands in for the card; tests set `connect` and `sign`, inspect `closed`, and send native steps with `emit`. */
 export const card = {
+  unlock: async (_id: number, _useSavedCertificate: boolean): Promise<Uint8Array | null> => null,
   connect: async (_id: number, _pin: string | null, _save: boolean, _messages: Messages): Promise<Uint8Array> => new Uint8Array(),
+  savedCertificate: async (): Promise<Uint8Array | null> => null,
   sign: async (_id: number, _digestInfo: Uint8Array): Promise<Uint8Array> => new Uint8Array(),
   closed: [] as [number, string | null, string | null][],
   listeners: new Set<StepListener>(),
@@ -11,7 +13,9 @@ export const card = {
 };
 
 export const requireNativeModule = () => ({
+  unlock: (id: number, _prompt: string, _cancel: string, useSavedCertificate: boolean) => card.unlock(id, useSavedCertificate),
   connect: (id: number, pin: string | null, save: boolean, messages: Messages) => card.connect(id, pin, save, messages),
+  savedCertificate: () => card.savedCertificate(),
   sign: (id: number, digestInfo: Uint8Array) => card.sign(id, digestInfo),
   close: (id: number, error: string | null, done: string | null) => void card.closed.push([id, error, done]),
   addListener: (_event: 'onStep', listener: StepListener) => {

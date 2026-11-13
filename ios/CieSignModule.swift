@@ -12,16 +12,36 @@ public class CieSignModule: Module {
 
     Events("onStep")
 
-    // `messages`: NFC sheet texts by step, `prompt` first.
+    AsyncFunction("unlock") {
+      @MainActor (id: Int, biometricPrompt: String, biometricCancel: String, useSavedCertificate: Bool) async throws -> Data? in
+      guard NFCTagReaderSession.readingAvailable else { throw failure("NFC_UNAVAILABLE", "NFC tag reading is not available") }
+      guard id > self.closed else { throw cancelled }
+      self.reader?.close(nil, nil)
+      let reader = Reader(id: id, onStep: self.reporter(id))
+      self.reader = reader
+      do {
+        return try await reader.unlock(biometricPrompt: biometricPrompt, biometricCancel: biometricCancel, useSavedCertificate: useSavedCertificate)
+      } catch {
+        throw coded(error)
+      }
+    }
+
+    // `messages`: NFC sheet texts by step, `prompt` first. A nil `pin` continues the session `unlock` started.
     AsyncFunction("connect") {
       @MainActor (id: Int, pin: String?, save: Bool, messages: [String: String], biometricPrompt: String, biometricCancel: String) async throws -> Data in
       guard NFCTagReaderSession.readingAvailable else { throw failure("NFC_UNAVAILABLE", "NFC tag reading is not available") }
       guard id > self.closed else { throw cancelled }
-      self.reader?.close(nil, nil)
-      let reader = Reader(id: id, messages: messages, onStep: self.reporter(id))
-      self.reader = reader
+      let reader: Reader
+      if pin == nil {
+        guard let unlocked = self.reader, unlocked.id == id else { throw cancelled }
+        reader = unlocked
+      } else {
+        self.reader?.close(nil, nil)
+        reader = Reader(id: id, onStep: self.reporter(id))
+        self.reader = reader
+      }
       do {
-        return try await reader.connect(pin: pin, save: save, biometricPrompt: biometricPrompt, biometricCancel: biometricCancel)
+        return try await reader.connect(pin: pin, save: save, messages: messages)
       } catch {
         let error = coded(reader.invalidation ?? error)
         if pin == nil, let code = (error as? Exception)?.code, code.hasPrefix("WRONG_PIN") || code == "PIN_LOCKED" { SavedPin.delete() }
@@ -53,6 +73,8 @@ public class CieSignModule: Module {
 
     AsyncFunction("forgetPin") { SavedPin.delete() }
 
+    AsyncFunction("savedCertificate") { () -> Data? in SavedPin.certificate()?.certificate }
+
     OnDestroy {
       DispatchQueue.main.async { self.reader?.close(nil, nil) }
     }
@@ -67,21 +89,21 @@ public class CieSignModule: Module {
 /// One NFCTagReaderSession; used on the main thread only.
 private final class Reader: NSObject, NFCTagReaderSessionDelegate {
   let id: Int
-  private let messages: [String: String]
+  private var messages: [String: String] = [:]
   private let onStep: (String) -> Void
   private var session: NFCTagReaderSession?
   private var pending: CheckedContinuation<Data, Error>?
   private var pin = ""
   private var save = false
   private var owner: Data?  // NIS of the card the saved PIN belongs to
+  private var savedCertificate: Data?  // that card's certificate file, when the session uses it instead of reading it
   private var biometrics: LAContext?
   private var closed = false
   private(set) var card: CieCard?
   private(set) var invalidation: Error?
 
-  init(id: Int, messages: [String: String], onStep: @escaping (String) -> Void) {
+  init(id: Int, onStep: @escaping (String) -> Void) {
     self.id = id
-    self.messages = messages
     self.onStep = onStep
   }
 
@@ -96,19 +118,29 @@ private final class Reader: NSObject, NFCTagReaderSessionDelegate {
     onStep(step)
   }
 
-  /// A nil `pin` unlocks the saved one with Face ID or Touch ID; `save` saves `pin` once the card accepts it, with no
-  /// prompt, since writing the Keychain item needs no authentication.
-  func connect(pin: String?, save: Bool, biometricPrompt: String, biometricCancel: String) async throws -> Data {
+  /// Unlocks the saved PIN with Face ID or Touch ID for `connect`. With `useSavedCertificate`, returns the certificate saved
+  /// with it, when it is of the same card: `connect` then returns it instead of reading it from the card.
+  func unlock(biometricPrompt: String, biometricCancel: String, useSavedCertificate: Bool) async throws -> Data? {
+    let context = LAContext()
+    context.localizedCancelTitle = biometricCancel
+    context.localizedFallbackTitle = ""
+    biometrics = context
+    (pin, owner) = try await SavedPin.unlock(context, reason: biometricPrompt)
+    guard !closed else { throw cancelled }
+    if useSavedCertificate, let saved = SavedPin.certificate(), saved.card == owner { savedCertificate = saved.certificate }
+    return savedCertificate
+  }
+
+  /// A nil `pin` is the saved one `unlock` unlocked; `save` saves `pin` once the card accepts it, with no prompt, since
+  /// writing the Keychain item needs no authentication.
+  func connect(pin: String?, save: Bool, messages: [String: String]) async throws -> Data {
     if let pin {
       if save, !SavedPin.canSave { throw SavedPinError.biometryUnavailable }
       (self.pin, self.save) = (pin, save)
-    } else {
-      let context = LAContext()
-      context.localizedCancelTitle = biometricCancel
-      context.localizedFallbackTitle = ""
-      biometrics = context
-      (self.pin, owner) = try await SavedPin.unlock(context, reason: biometricPrompt)
+    } else if owner == nil {
+      throw SavedPinError.notSaved
     }
+    self.messages = messages
     guard !closed else { throw cancelled }
     return try await withCheckedThrowingContinuation { continuation in
       guard let session = NFCTagReaderSession(pollingOption: .iso14443, delegate: self, queue: .main) else {
@@ -161,7 +193,13 @@ private final class Reader: NSObject, NFCTagReaderSessionDelegate {
         reach("pin")
         try await card.open(pin: pin)
         if save { try SavedPin.store(pin, card: serviceId) }
-        let certificate = try await card.certificate()
+        let certificate: Data
+        if let savedCertificate {
+          certificate = savedCertificate
+        } else {
+          certificate = try await card.certificate()
+          if save || owner != nil { SavedPin.storeCertificate(certificate, card: serviceId) }
+        }
         self.card = card
         show("ready")  // JS reports `ready` once connect resolves
         finish(.success(certificate))

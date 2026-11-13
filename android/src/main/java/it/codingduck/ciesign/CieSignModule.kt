@@ -28,6 +28,7 @@ class CieSignModule : Module() {
   private var tag: IsoDep? = null
   private var card: CieCard? = null
   private var prompt: BiometricPrompt? = null
+  private var unlocked: Unlocked? = null
   private val savedPin by lazy { SavedPin(requireNotNull(appContext.reactContext)) }
 
   override fun definition() = ModuleDefinition {
@@ -35,36 +36,54 @@ class CieSignModule : Module() {
 
     Events("onStep")
 
-    // A null `pin` unlocks the saved one; `save` saves `pin` once the card accepts it. Both show the biometric prompt first.
-    // The messages are for the iOS NFC sheet: Android has none.
+    // Unlocks the saved PIN for `connect` behind the biometric prompt. With `useSavedCertificate`, resolves to the
+    // certificate saved with it when it is of the same card, which `connect` then returns instead of reading it.
+    AsyncFunction("unlock") { id: Int, biometricPrompt: String, biometricCancel: String, useSavedCertificate: Boolean, promise: Promise ->
+      val activity = appContext.currentActivity ?: throw CodedException("NFC_UNAVAILABLE", "No foreground activity", null)
+      if (NfcAdapter.getDefaultAdapter(activity)?.isEnabled != true) throw CodedException("NFC_UNAVAILABLE", "NFC is missing or turned off", null)
+      start(id, promise)
+      try {
+        val saved = savedPin.saved() ?: throw CodedException("PIN_NOT_SAVED", "No saved PIN", null)
+        authenticate(activity, id, saved.cipher, biometricPrompt, biometricCancel) {
+          val pin = try {
+            String(it.doFinal(saved.pin))
+          } catch (e: Exception) {
+            savedPin.delete()
+            throw CodedException("PIN_NOT_SAVED", "The saved PIN cannot be decrypted", e)
+          }
+          val certificate = if (useSavedCertificate) savedPin.certificate(saved.card) else null
+          val waiting = synchronized(lock) { take(id)?.also { unlocked = Unlocked(pin, saved.card, certificate) } }
+          waiting?.resolve(certificate)
+        }
+      } catch (e: Exception) {
+        take(id)?.reject(coded(e))
+      }
+    }
+
+    // A null `pin` continues the session `unlock` started; `save` saves `pin` once the card accepts it, after the biometric
+    // prompt. The messages are for the iOS NFC sheet: Android has none.
     AsyncFunction("connect") { id: Int, pin: String?, save: Boolean, _: Map<String, String>, biometricPrompt: String, biometricCancel: String, promise: Promise ->
       val activity = appContext.currentActivity ?: throw CodedException("NFC_UNAVAILABLE", "No foreground activity", null)
       val adapter = NfcAdapter.getDefaultAdapter(activity)
       if (adapter?.isEnabled != true) throw CodedException("NFC_UNAVAILABLE", "NFC is missing or turned off", null)
-      synchronized(lock) {
-        if (id <= closed) throw cancelled()
-        end()
-        session = id
-        pending = promise
+      val saved = if (pin == null) {
+        synchronized(lock) {
+          if (id <= closed || session != id) throw cancelled()
+          val found = unlocked ?: throw CodedException("PIN_NOT_SAVED", "The saved PIN was not unlocked", null)
+          pending = promise
+          found
+        }
+      } else {
+        start(id, promise)
+        null
       }
       try {
         when {
-          pin == null -> {
-            val saved = savedPin.saved() ?: throw CodedException("PIN_NOT_SAVED", "No saved PIN", null)
-            authenticate(activity, id, saved.cipher, biometricPrompt, biometricCancel) {
-              val unlocked = try {
-                String(it.doFinal(saved.pin))
-              } catch (e: Exception) {
-                savedPin.delete()
-                throw CodedException("PIN_NOT_SAVED", "The saved PIN cannot be decrypted", e)
-              }
-              read(activity, adapter, id, unlocked, saved.card, null)
-            }
-          }
+          saved != null -> read(activity, adapter, id, saved.pin, saved.card, null, saved.certificate)
           save -> authenticate(activity, id, savedPin.encrypter(), biometricPrompt, biometricCancel) {
-            read(activity, adapter, id, pin, null, savedPin.seal(it, pin))
+            read(activity, adapter, id, requireNotNull(pin), null, savedPin.seal(it, requireNotNull(pin)), null)
           }
-          else -> read(activity, adapter, id, pin, null, null)
+          else -> read(activity, adapter, id, requireNotNull(pin), null, null, null)
         }
       } catch (e: Exception) {
         take(id)?.reject(coded(e))
@@ -91,16 +110,29 @@ class CieSignModule : Module() {
 
     AsyncFunction("forgetPin") { savedPin.delete() }
 
+    AsyncFunction("savedCertificate") { savedPin.certificate() }
+
     OnDestroy { synchronized(lock) { end() } }
+  }
+
+  /** Ends any other session and makes `id` the current one, settled by `promise`. */
+  private fun start(id: Int, promise: Promise) = synchronized(lock) {
+    if (id <= closed) throw cancelled()
+    end()
+    session = id
+    pending = promise
   }
 
   private fun take(id: Int): Promise? = synchronized(lock) { pending.takeIf { session == id }.also { if (it != null) pending = null } }
 
-  /** `owner`: NIS the saved PIN belongs to; `sealed`: encrypted PIN to save once the card accepts it. */
-  private fun read(activity: Activity, adapter: NfcAdapter, id: Int, pin: String, owner: String?, sealed: String?) {
+  /**
+   * `owner`: NIS the saved PIN belongs to; `sealed`: encrypted PIN to save once the card accepts it; `saved`: that card's
+   * certificate file, returned instead of reading it.
+   */
+  private fun read(activity: Activity, adapter: NfcAdapter, id: Int, pin: String, owner: String?, sealed: String?, saved: ByteArray?) {
     val flags = NfcAdapter.FLAG_READER_NFC_A or NfcAdapter.FLAG_READER_NFC_B or NfcAdapter.FLAG_READER_SKIP_NDEF_CHECK
     synchronized(lock) {
-      if (session == id) adapter.enableReaderMode(activity, { onTag(it, id, pin, owner, sealed) }, flags, null)
+      if (session == id) adapter.enableReaderMode(activity, { onTag(it, id, pin, owner, sealed, saved) }, flags, null)
     }
   }
 
@@ -133,7 +165,7 @@ class CieSignModule : Module() {
   }
 
   // Runs on the NFC thread; the tag stays connected after returning, until the session ends.
-  private fun onTag(discovered: Tag, id: Int, pin: String, owner: String?, sealed: String?) {
+  private fun onTag(discovered: Tag, id: Int, pin: String, owner: String?, sealed: String?, saved: ByteArray?) {
     val promise = take(id) ?: return
     var pinStatus = 0
     try {
@@ -160,8 +192,9 @@ class CieSignModule : Module() {
       val nis = c.serviceId()
       if (owner != null && owner != nis) throw CodedException("WRONG_CARD", "Not the card the PIN was saved for", null)
       step(id, "pin")
-      val certificate = c.open(pin)
+      c.open(pin)
       if (sealed != null) savedPin.store(nis, sealed)
+      val certificate = saved ?: c.certificate().also { if (sealed != null || owner != null) savedPin.storeCertificate(nis, it) }
       synchronized(lock) {
         if (session != id) throw cancelled()
         card = c
@@ -181,12 +214,16 @@ class CieSignModule : Module() {
     pending = null
     prompt?.let { appContext.currentActivity?.runOnUiThread(it::cancelAuthentication) }
     prompt = null
+    unlocked = null
     card = null
     runCatching { tag?.close() }
     tag = null
     session = 0
     appContext.currentActivity?.let { NfcAdapter.getDefaultAdapter(it)?.disableReaderMode(it) }
   }
+
+  /** The saved PIN `unlock` decrypted, its card's NIS and, when asked for, that card's saved certificate. */
+  private class Unlocked(val pin: String, val card: String, val certificate: ByteArray?)
 
   private fun cancelled() = CodedException("CANCELLED", "Cancelled", null)
 

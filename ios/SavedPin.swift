@@ -7,9 +7,11 @@ enum SavedPinError: Error {
 }
 
 /// The CIE PIN as a Keychain item that the Secure Enclave releases only after Face ID or Touch ID matches one of the
-/// faces or fingers enrolled when it was saved. It is never synced, backed up or restored to another device.
+/// faces or fingers enrolled when it was saved. It is never synced, backed up or restored to another device. Next to it,
+/// its card's certificate: public, so readable without biometrics, and replaced or deleted with the PIN.
 enum SavedPin {
   private static let item: [CFString: Any] = [kSecClass: kSecClassGenericPassword, kSecAttrService: "it.codingduck.ciesign.pin"]
+  private static let certificateItem: [CFString: Any] = [kSecClass: kSecClassGenericPassword, kSecAttrService: "it.codingduck.ciesign.certificate"]
 
   static var canSave: Bool { LAContext().canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil) }
 
@@ -63,8 +65,28 @@ enum SavedPin {
     return (String(decoding: pin, as: UTF8.self), card)
   }
 
+  /// Saves the certificate file of the card whose PIN is saved; `card` is its NIS. Best effort: without it, sessions read
+  /// the certificate from the card.
+  static func storeCertificate(_ certificate: Data, card: Data) {
+    SecItemDelete(certificateItem as CFDictionary)
+    let attributes: [CFString: Any] = [kSecAttrAccessible: kSecAttrAccessibleWhenUnlockedThisDeviceOnly, kSecAttrGeneric: card, kSecValueData: certificate]
+    SecItemAdd(certificateItem.merging(attributes) { $1 } as CFDictionary, nil)
+  }
+
+  /// The certificate file saved with the PIN and its card's NIS, without any UI; nil when none is saved.
+  static func certificate() -> (certificate: Data, card: Data)? {
+    guard isSaved else { return nil }
+    var result: CFTypeRef?
+    let query = certificateItem.merging([kSecReturnData: true, kSecReturnAttributes: true]) { $1 }
+    guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess, let found = result as? [CFString: Any],
+          let certificate = found[kSecValueData] as? Data, let card = found[kSecAttrGeneric] as? Data
+    else { return nil }
+    return (certificate, card)
+  }
+
   static func delete() {
     SecItemDelete(item as CFDictionary)
+    SecItemDelete(certificateItem as CFDictionary)
   }
 
   private static func access() -> SecAccessControl? {

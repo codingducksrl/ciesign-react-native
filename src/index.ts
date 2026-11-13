@@ -11,8 +11,8 @@ export type Pin = string | typeof SAVED_PIN;
 
 /**
  * Progress of a session, in order: `detected` the card is on the phone; `pin` the PIN is being verified; `ready` the PIN
- * is verified and the certificate read, `use` starts; `signing` a signature starts, once per `sign`; `done` `use`
- * resolved and the session is over.
+ * is verified and the certificate read (or taken from the saved one), `use` starts; `signing` a signature starts, once
+ * per `sign`; `done` `use` resolved and the session is over.
  */
 export type CieStep = 'detected' | 'pin' | 'ready' | 'signing' | 'done';
 
@@ -29,9 +29,13 @@ const MESSAGES: Record<CieStep, string> = {
 /**
  * `prompt`, `error`: texts of the iOS NFC sheet while it waits for the card and when the session fails; `messages`: its
  * text at each step. `onStep`: called at each step, e.g. to show progress on Android, which has no NFC sheet.
- * `savePin`: once the card accepts the PIN, save it for `SAVED_PIN`. `biometricPrompt`, `biometricCancel`: texts of the
- * biometric prompt shown before the card is read, wherever the secure hardware requires one: `SAVED_PIN` everywhere,
- * `savePin` on Android only.
+ * `savePin`: once the card accepts the PIN, save it for `SAVED_PIN`, with the card certificate. `biometricPrompt`,
+ * `biometricCancel`: texts of the biometric prompt shown before the card is read, wherever the secure hardware requires
+ * one: `SAVED_PIN` everywhere, `savePin` on Android only. `useSavedCertificate`: with `SAVED_PIN`, skip reading the
+ * certificate from the card and use the one saved with the PIN (see `savedCertificate`), when there is one.
+ * `beforeCard`: with `SAVED_PIN`, runs once the biometric prompt has unlocked the PIN and before the NFC session waits for
+ * the card, with the saved certificate the session will use (`useSavedCertificate`), or null: the session waits for it, so
+ * what to sign can be prepared after the prompt and outside iOS's 60-second NFC limit.
  */
 export type CieOptions = {
   prompt?: string;
@@ -41,6 +45,8 @@ export type CieOptions = {
   savePin?: boolean;
   biometricPrompt?: string;
   biometricCancel?: string;
+  useSavedCertificate?: boolean;
+  beforeCard?: (savedCertificate: Bytes | null) => Promise<void>;
 };
 
 /** A card whose PIN has been verified, for as long as `use` runs. */
@@ -65,7 +71,9 @@ export async function cieSession<T>(pin: Pin, use: (session: CieSession) => Prom
     savePin = false,
     biometricPrompt = pin === SAVED_PIN ? 'Sblocca il PIN della CIE' : 'Salva il PIN della CIE',
     biometricCancel = 'Annulla',
+    useSavedCertificate = false,
     onStep,
+    beforeCard,
   } = options;
   const message = (s: CieStep) => options.messages?.[s] ?? MESSAGES[s];
   const id = ++session;
@@ -81,6 +89,10 @@ export async function cieSession<T>(pin: Pin, use: (session: CieSession) => Prom
   const subscription = onStep && Native.addListener('onStep', (event) => event.id === id && step(event.step));
   try {
     const sheet = { prompt, detected: message('detected'), pin: message('pin'), ready: message('ready'), signing: message('signing') };
+    if (pin === SAVED_PIN) {
+      const saved = await Native.unlock(id, biometricPrompt, biometricCancel, useSavedCertificate);
+      await beforeCard?.(saved && trimDer(saved));
+    }
     const certificate = trimDer(await Native.connect(id, pin === SAVED_PIN ? null : pin, savePin, sheet, biometricPrompt, biometricCancel));
     step('ready');
     let last: Promise<unknown> = Promise.resolve();
@@ -111,5 +123,15 @@ export const cancel = () => Native.close(session, null, null);
 /** Whether a PIN is saved, without showing any UI. */
 export const pinStatus = (): Promise<PinStatus> => Native.pinStatus();
 
-/** Deletes the saved PIN. */
+/** Deletes the saved PIN and its certificate. */
 export const forgetPin = (): Promise<void> => Native.forgetPin();
+
+/**
+ * The DER certificate of the card whose PIN is saved, without any UI: known before the card is on the phone, e.g. to
+ * prepare what to sign before a `SAVED_PIN` session with `useSavedCertificate`. Null when no PIN is saved, or none was
+ * saved with it yet: a `SAVED_PIN` session that reads the certificate from the card saves it.
+ */
+export async function savedCertificate(): Promise<Bytes | null> {
+  const certificate = await Native.savedCertificate();
+  return certificate ? trimDer(certificate) : null;
+}

@@ -66,10 +66,10 @@ Inputs and outputs are `Uint8Array`. The promise stays pending until the card is
 
 | Export | |
 |---|---|
-| `cieSession(pin, use, { prompt?, error?, messages?, onStep?, savePin?, biometricPrompt?, biometricCancel? })` | Waits for the card and verifies the PIN, then resolves to what `use({ certificate, sign })` resolves to. The NFC session ends when `use` settles: the card must stay on the phone until then. `pin` is the 8-digit PIN or `SAVED_PIN`. `prompt` and `error` are the iOS NFC sheet texts while waiting for the card and on failure; `messages` and `onStep` are explained under [Progress](#progress), the others under [Saved PIN](#saved-pin). |
+| `cieSession(pin, use, { prompt?, error?, messages?, onStep?, savePin?, biometricPrompt?, biometricCancel?, useSavedCertificate?, beforeCard? })` | Waits for the card and verifies the PIN, then resolves to what `use({ certificate, sign })` resolves to. The NFC session ends when `use` settles: the card must stay on the phone until then. `pin` is the 8-digit PIN or `SAVED_PIN`. `prompt` and `error` are the iOS NFC sheet texts while waiting for the card and on failure; `messages` and `onStep` are explained under [Progress](#progress), the others under [Saved PIN](#saved-pin). |
 | `certificate` | The card's DER authentication certificate: holder name and fiscal code are in its subject. |
 | `sign(digestInfo)` | RSA PKCS#1 v1.5 signature (the card adds the padding) of a DER DigestInfo, checked against `certificate`. Call it as often as needed while `use` runs; calls run one at a time, in order. |
-| `SAVED_PIN`, `pinStatus()`, `forgetPin()` | See [Saved PIN](#saved-pin). |
+| `SAVED_PIN`, `pinStatus()`, `forgetPin()`, `savedCertificate()` | See [Saved PIN](#saved-pin). |
 | `cancel()` | Aborts the session in progress. Android has no system NFC sheet, so give users a cancel button. |
 
 iOS ends an NFC session 60 seconds after it starts, `use` included: prepare what does not depend on the certificate, such as a PDF's byte range, before calling `cieSession`.
@@ -101,7 +101,7 @@ A session goes through these steps. On iOS the NFC sheet shows the text of each 
 |---|---|---|
 | `detected` | The card is on the phone. | CIE rilevata, non allontanarla |
 | `pin` | The PIN is being verified. | Verifica del PIN… |
-| `ready` | PIN verified and certificate read: `use` starts. | PIN verificato |
+| `ready` | PIN verified and certificate read, or taken from the saved one: `use` starts. | PIN verificato |
 | `signing` | A signature starts, once per `sign`. | Firma in corso… |
 | `done` | `use` resolved and the session is over. The sheet shows it next to its checkmark. | Operazione completata |
 
@@ -138,9 +138,27 @@ const signatures =
 - **Native only.** A saved PIN is decrypted in native code and sent to the card; it never reaches JavaScript.
 - One PIN per app: saving again replaces it. `forgetPin()` deletes it. `savePin` fails with `BIOMETRIC_UNAVAILABLE` before the card is read when `pinStatus()` is `'unavailable'`.
 
+#### Saved certificate
+
+The card certificate is saved with the PIN: on iOS in a Keychain item of its own, readable while the device is unlocked, never synced or backed up; on Android next to the encrypted PIN in `noBackupFilesDir`. It is public (it goes into every signature), so no biometric guards it. It is replaced and deleted with the PIN; a `SAVED_PIN` session that reads the certificate from the card saves it too, for PINs saved before it was.
+
+`savedCertificate()` returns it without any UI, or `null`. Knowing it before the card is on the phone lets you prepare what to sign before the NFC session, which iOS ends after 60 seconds. Then `useSavedCertificate: true` makes the `SAVED_PIN` session skip reading it: the card is still checked by its NIS (`WRONG_CARD` otherwise) and every signature against the certificate. Without the option, or without a saved certificate, the session reads it from the card as usual.
+
+To prepare it after the biometric prompt rather than before, pass `beforeCard`: with `SAVED_PIN`, the session calls it once the prompt has unlocked the PIN, with the saved certificate it will use (or `null`), and waits for it before the NFC session starts. A user who cancels the prompt never reaches your server, and the wait doesn't count toward iOS's 60 seconds. If it throws, the session ends with that error and the card is never read.
+
+```ts
+let prepared: Prepared | null = null;
+const signatures = await cieSession(SAVED_PIN, async (cie) => sign(prepared ?? (await prepare(cie.certificate)), cie), {
+  useSavedCertificate: true,
+  beforeCard: async (certificate) => {
+    if (certificate) prepared = await prepare(certificate); // e.g. your server's hashes to sign
+  },
+});
+```
+
 ## How it works
 
-`cieSession` opens one NFC session: NIS read (EF 1001), secure messaging (Diffie-Hellman and device authentication), PIN verification, certificate read (EF 1003). Each `sign` then sends `MSE SET` (key `0x81`, RSA PKCS#1) and `INTERNAL AUTHENTICATE` with the DigestInfo over the same secure channel.
+`cieSession` opens one NFC session: NIS read (EF 1001), secure messaging (Diffie-Hellman and device authentication), PIN verification, certificate read (EF 1003, skipped with `useSavedCertificate`). Each `sign` then sends `MSE SET` (key `0x81`, RSA PKCS#1) and `INTERNAL AUTHENTICATE` with the DigestInfo over the same secure channel.
 
 - Android drives `CieCommands` from PagoPA's [`cie-sdk-android`](https://github.com/pagopa/cie-sdk-android) through a Java shim, because the class is Kotlin-internal. The dependency is pinned to `0.1.11`: check the shim before upgrading.
 - iOS implements the same protocol in `ios/CieCard.swift`, derived from PagoPA's [`cie-sdk-ios`](https://github.com/pagopa/cie-sdk-ios), whose signing code is not public.
